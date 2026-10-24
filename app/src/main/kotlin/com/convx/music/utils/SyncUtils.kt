@@ -89,6 +89,15 @@ data class SyncState(
     val currentOperation: String = ""
 )
 
+/** Keep a populated playlist intact when an upstream response unexpectedly says it is empty.
+ * An intentional bulk clear must use an explicit reviewed operation, not a transient sync read.
+ */
+internal fun requireSafeRemotePlaylist(remoteIds: List<String>, localIds: List<String>) {
+    check(remoteIds.isNotEmpty() || localIds.isEmpty()) {
+        "Remote playlist returned empty; retain local songs until confirmed"
+    }
+}
+
 /** A full sync is complete only if every requested stage actually reported success. */
 internal fun SyncState.incompleteSections(): List<String> = listOf(
     "liked songs" to likedSongs,
@@ -1004,6 +1013,7 @@ class SyncUtils @Inject constructor(
         val localIds = database.playlistSongs(playlistId).first()
             .sortedBy { it.map.position }
             .map { it.song.id }
+        requireSafeRemotePlaylist(remoteIds, localIds)
 
         if (remoteIds == localIds) return@withContext
 
