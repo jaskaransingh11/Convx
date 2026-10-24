@@ -6,7 +6,7 @@ import java.util.UUID
 enum class NetworkProtocol { WEBDAV, SMB }
 
 data class SourceCredentials(val username: String = "", val password: String = "", val domain: String = "") {
-    override fun toString(): String = "SourceCredentials(username=$username, domain=$domain)"
+    override fun toString(): String = "SourceCredentials(redacted)"
 }
 
 sealed interface NetworkServer {

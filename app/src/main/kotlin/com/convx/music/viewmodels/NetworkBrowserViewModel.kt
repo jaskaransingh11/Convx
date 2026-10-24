@@ -66,6 +66,8 @@ class NetworkBrowserViewModel @Inject constructor(
     suspend fun mediaItems(serverId: String, files: List<NetworkEntry>): List<MediaItem> = files.mapNotNull { entry ->
         val track = NetworkMedia.track(serverId, entry, emptyList())
         NetworkLibraryImporter.insert(database, track)
-        database.getSongById(track.id)?.toMediaItem()
+        com.convx.music.utils.RecordingIndex.index(database, repository, track)
+        val canonical = database.recordingDao.source(track.id)?.takeIf { it.state in setOf("manual", "verified_metadata") }?.canonicalId
+        database.getSongById(canonical ?: track.id)?.toMediaItem()
     }
 }

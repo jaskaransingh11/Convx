@@ -59,6 +59,11 @@ fun NetworkStorageSettingsScreen(
     val servers by viewModel.servers.collectAsStateWithLifecycle()
     val busyId by viewModel.busyId.collectAsStateWithLifecycle()
     val status by viewModel.status.collectAsStateWithLifecycle()
+    val recordings by viewModel.recordingSources.collectAsStateWithLifecycle()
+    val selectedRecording by viewModel.selectedRecording.collectAsStateWithLifecycle()
+    val linkTarget by viewModel.linkTarget.collectAsStateWithLifecycle()
+    val linkError by viewModel.linkError.collectAsStateWithLifecycle()
+    val savingLink by viewModel.savingLink.collectAsStateWithLifecycle()
     var showAdd by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<NetworkServer?>(null) }
 
@@ -118,6 +123,42 @@ fun NetworkStorageSettingsScreen(
             }
         }
         Spacer(Modifier.height(24.dp))
+        if (recordings.isNotEmpty()) {
+            Text(stringResource(R.string.recording_links), style = AppTheme.typography.titleMedium)
+            Text(stringResource(R.string.recording_links_description), style = AppTheme.typography.bodyMedium)
+            recordings.forEach { source ->
+                TextButton(onClick = { viewModel.selectRecording(source) }, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth()) {
+                        Text(source.title.ifBlank { source.sourceId.substringAfterLast('/') })
+                        Text(stringResource(R.string.recording_link_details, source.album.orEmpty(), source.durationMs / 1000,
+                            source.canonicalId ?: stringResource(R.string.recording_unlinked)), style = AppTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+    }
+
+    selectedRecording?.let { source ->
+        AlertDialog(
+            onDismissRequest = { if (!savingLink) viewModel.selectRecording(null) },
+            title = { Text(stringResource(R.string.recording_links)) },
+            text = {
+                Column {
+                    Text(source.title)
+                    Text(source.artists.replace('\u001f', ','))
+                    Text(stringResource(R.string.recording_links_description))
+                    OutlinedTextField(value = linkTarget, onValueChange = { viewModel.linkTarget.value = it },
+                        label = { Text(stringResource(R.string.recording_youtube_id)) }, singleLine = true)
+                    if (linkError) Text(stringResource(R.string.recording_link_failed), color = AppTheme.colorScheme.error)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.saveLink() }, enabled = !savingLink) { Text(stringResource(android.R.string.ok)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.saveLink(reject = true) }, enabled = !savingLink) { Text(stringResource(R.string.recording_unlink)) }
+            },
+        )
     }
 
     if (showAdd) {

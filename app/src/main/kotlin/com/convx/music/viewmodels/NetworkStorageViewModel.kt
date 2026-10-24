@@ -24,6 +24,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
+import com.convx.music.db.entities.RecordingSourceEntity
+import com.convx.music.utils.RecordingIndex
 
 @HiltViewModel
 class NetworkStorageViewModel @Inject constructor(
@@ -39,6 +44,32 @@ class NetworkStorageViewModel @Inject constructor(
 
     private val _status = MutableStateFlow<String?>(null)
     val status: StateFlow<String?> = _status.asStateFlow()
+
+    val recordingSources = database.recordingDao.sources().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val selectedRecording = MutableStateFlow<RecordingSourceEntity?>(null)
+    val linkTarget = MutableStateFlow("")
+    val linkError = MutableStateFlow(false)
+    val savingLink = MutableStateFlow(false)
+
+    fun selectRecording(source: RecordingSourceEntity?) {
+        selectedRecording.value = source
+        linkTarget.value = source?.canonicalId.orEmpty()
+        linkError.value = false
+    }
+
+    fun saveLink(reject: Boolean = false) {
+        val source = selectedRecording.value ?: return
+        if (savingLink.value) return
+        savingLink.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                RecordingIndex.correct(database, source, if (reject) null else linkTarget.value.trim())
+                selectedRecording.value = null
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { linkError.value = true }
+            finally { savingLink.value = false }
+        }
+    }
 
     fun load() {
         viewModelScope.launch { runCatching { repository.loadServers() } }

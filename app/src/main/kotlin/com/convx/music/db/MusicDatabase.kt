@@ -56,6 +56,9 @@ class MusicDatabase(
     // InternalDatabase, so both bindings resolve to the one configured builder.
     val delegate: InternalDatabase,
 ) : DatabaseDao by delegate.dao {
+    val recordingDao: com.convx.music.db.daos.RecordingDao
+        get() = delegate.recordingDao
+
     val speedDialDao: SpeedDialDao
         get() = delegate.speedDialDao
 
@@ -92,6 +95,9 @@ class MusicDatabase(
 @Database(
     entities = [
         SongEntity::class,
+        com.convx.music.db.entities.RecordingSourceEntity::class,
+        com.convx.music.db.entities.LikeOutboxEntity::class,
+        com.convx.music.db.entities.RemoteLikeSnapshotEntity::class,
         ArtistEntity::class,
         AlbumEntity::class,
         PlaylistEntity::class,
@@ -115,7 +121,7 @@ class MusicDatabase(
         SortedSongAlbumMap::class,
         PlaylistSongMapPreview::class,
     ],
-    version = 40,
+    version = 41,
     exportSchema = true,
     autoMigrations = [
         AutoMigration(from = 2, to = 3),
@@ -154,10 +160,12 @@ class MusicDatabase(
         AutoMigration(from = 36, to = 37),
         AutoMigration(from = 37, to = 38),
         AutoMigration(from = 38, to = 39),
+        AutoMigration(from = 40, to = 41),
     ],
 )
 @TypeConverters(Converters::class)
 abstract class InternalDatabase : RoomDatabase() {
+    abstract val recordingDao: com.convx.music.db.daos.RecordingDao
     abstract val dao: DatabaseDao
     abstract val speedDialDao: SpeedDialDao
 

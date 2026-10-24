@@ -17,16 +17,16 @@ suspend fun Result<PlaylistPage>.completed(): Result<PlaylistPage> = runCatching
     
     while (continuation != null && requestCount < maxRequests) {
         if (continuation in seenContinuations) {
-            break
+            error("Repeated playlist continuation")
         }
         seenContinuations.add(continuation)
         requestCount++
         
-        val continuationPage = YouTube.playlistContinuation(continuation).getOrNull() ?: break
+        val continuationPage = YouTube.playlistContinuation(continuation).getOrThrow()
         
         if (continuationPage.songs.isEmpty()) {
             consecutiveEmptyResponses++
-            if (consecutiveEmptyResponses >= 2) break
+            if (consecutiveEmptyResponses >= 2 && continuationPage.continuation != null) error("Playlist continuation made no progress")
         } else {
             consecutiveEmptyResponses = 0
             songs += continuationPage.songs
@@ -34,6 +34,7 @@ suspend fun Result<PlaylistPage>.completed(): Result<PlaylistPage> = runCatching
         
         continuation = continuationPage.continuation
     }
+    check(continuation == null) { "Playlist pagination limit reached" }
     PlaylistPage(
         playlist = page.playlist,
         songs = songs,
@@ -54,16 +55,16 @@ suspend fun Result<LibraryPage>.completed(): Result<LibraryPage> = runCatching {
     
     while (continuation != null && requestCount < maxRequests) {
         if (continuation in seenContinuations) {
-            break
+            error("Repeated library continuation")
         }
         seenContinuations.add(continuation)
         requestCount++
         
-        val continuationPage = YouTube.libraryContinuation(continuation).getOrNull() ?: break
+        val continuationPage = YouTube.libraryContinuation(continuation).getOrThrow()
         
         if (continuationPage.items.isEmpty()) {
             consecutiveEmptyResponses++
-            if (consecutiveEmptyResponses >= 2) break
+            if (consecutiveEmptyResponses >= 2 && continuationPage.continuation != null) error("Library continuation made no progress")
         } else {
             consecutiveEmptyResponses = 0
             items += continuationPage.items
@@ -71,6 +72,7 @@ suspend fun Result<LibraryPage>.completed(): Result<LibraryPage> = runCatching {
         
         continuation = continuationPage.continuation
     }
+    check(continuation == null) { "Library pagination limit reached" }
     LibraryPage(
         items = items,
         continuation = null

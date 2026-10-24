@@ -36,7 +36,9 @@ object NetworkLibraryImporter {
         var skipped = 0
         library.tracks.forEach { track ->
             if (insert(database, track)) added++ else skipped++
+            if (repository is com.convx.storage.data.NetworkMusicRepository) RecordingIndex.index(database, repository, track)
         }
+        RecordingIndex.reconcile(database)
         return Result(added, skipped, library.truncated)
     }
 
@@ -78,6 +80,8 @@ object NetworkLibraryImporter {
                 }
             }
             true
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Timber.tag("NetworkImport").w(e, "Failed to insert ${track.title}")
             false

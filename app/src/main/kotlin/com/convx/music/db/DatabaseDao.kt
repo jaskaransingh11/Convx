@@ -107,19 +107,23 @@ private fun sortAlbumsByArtistGraph(albums: List<Album>): List<Album> {
 @Dao
 interface DatabaseDao {
     @Transaction
-    @Query("SELECT * FROM song WHERE inLibrary IS NOT NULL ORDER BY rowId")
+    @Query("SELECT * FROM song WHERE isLocal = 0 AND duration > 0")
+    suspend fun recordingCanonicalSongs(): List<Song>
+
+    @Transaction
+    @Query("SELECT * FROM song WHERE inLibrary IS NOT NULL AND NOT EXISTS (SELECT 1 FROM recording_source r WHERE r.sourceId = song.id AND r.canonicalId IS NOT NULL AND r.state IN ('manual', 'verified_metadata')) ORDER BY rowId")
     fun songsByRowIdAsc(): Flow<List<Song>>
 
     @Transaction
-    @Query("SELECT * FROM song WHERE inLibrary IS NOT NULL ORDER BY inLibrary")
+    @Query("SELECT * FROM song WHERE inLibrary IS NOT NULL AND NOT EXISTS (SELECT 1 FROM recording_source r WHERE r.sourceId = song.id AND r.canonicalId IS NOT NULL AND r.state IN ('manual', 'verified_metadata')) ORDER BY inLibrary")
     fun songsByCreateDateAsc(): Flow<List<Song>>
 
     @Transaction
-    @Query("SELECT * FROM song WHERE inLibrary IS NOT NULL ORDER BY title COLLATE NOCASE")
+    @Query("SELECT * FROM song WHERE inLibrary IS NOT NULL AND NOT EXISTS (SELECT 1 FROM recording_source r WHERE r.sourceId = song.id AND r.canonicalId IS NOT NULL AND r.state IN ('manual', 'verified_metadata')) ORDER BY title COLLATE NOCASE")
     fun songsByNameAsc(): Flow<List<Song>>
 
     @Transaction
-    @Query("SELECT * FROM song WHERE inLibrary IS NOT NULL ORDER BY totalPlayTime")
+    @Query("SELECT * FROM song WHERE inLibrary IS NOT NULL AND NOT EXISTS (SELECT 1 FROM recording_source r WHERE r.sourceId = song.id AND r.canonicalId IS NOT NULL AND r.state IN ('manual', 'verified_metadata')) ORDER BY totalPlayTime")
     fun songsByPlayTimeAsc(): Flow<List<Song>>
 
 
@@ -1405,7 +1409,7 @@ interface DatabaseDao {
     }.map { it.reversed(descending) }
 
     @Transaction
-    @Query("SELECT * FROM song WHERE title LIKE '%' || :query || '%' AND inLibrary IS NOT NULL AND (:localOnly = 0 OR isLocal = 1) LIMIT :previewSize")
+    @Query("SELECT * FROM song WHERE title LIKE '%' || :query || '%' AND inLibrary IS NOT NULL AND (:localOnly = 0 OR isLocal = 1) AND (:localOnly = 1 OR NOT EXISTS (SELECT 1 FROM recording_source r WHERE r.sourceId = song.id AND r.canonicalId IS NOT NULL AND r.state IN ('manual', 'verified_metadata'))) LIMIT :previewSize")
     fun searchSongs(
         query: String,
         previewSize: Int = Int.MAX_VALUE,
@@ -1448,7 +1452,7 @@ interface DatabaseDao {
     // in LocalSearchViewModel scores these in Kotlin when the exact substring search (a typo)
     // comes back empty, so this must stay in sync with whatever "in library" means up there.
     @Transaction
-    @Query("SELECT * FROM song WHERE inLibrary IS NOT NULL AND (:localOnly = 0 OR isLocal = 1)")
+    @Query("SELECT * FROM song WHERE inLibrary IS NOT NULL AND (:localOnly = 0 OR isLocal = 1) AND (:localOnly = 1 OR NOT EXISTS (SELECT 1 FROM recording_source r WHERE r.sourceId = song.id AND r.canonicalId IS NOT NULL AND r.state IN ('manual', 'verified_metadata')))")
     fun allSearchableSongs(localOnly: Boolean = false): Flow<List<Song>>
 
     @Transaction
@@ -1808,7 +1812,19 @@ interface DatabaseDao {
     }
 
     @Update
-    fun update(song: SongEntity)
+    fun updateFromSync(song: SongEntity)
+
+    @Query("INSERT INTO like_outbox(accountScope, videoId, desiredLiked, revision) VALUES(:scope, :videoId, :liked, 1) ON CONFLICT(accountScope, videoId) DO UPDATE SET desiredLiked = :liked, revision = revision + 1")
+    fun queueLike(scope: String, videoId: String, liked: Boolean)
+
+    @Transaction
+    fun update(song: SongEntity) {
+        val previous = getSongByIdBlocking(song.id)?.song
+        updateFromSync(song)
+        if (previous != null && previous.liked != song.liked && song.id.matches(Regex("[A-Za-z0-9_-]{11}"))) {
+            com.convx.music.utils.currentYouTubeSyncScope()?.let { scope -> queueLike(scope, song.id, song.liked) }
+        }
+    }
 
     @Update
     fun update(artist: ArtistEntity)
