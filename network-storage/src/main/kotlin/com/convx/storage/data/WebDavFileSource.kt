@@ -153,8 +153,24 @@ private class HttpRemoteFile(private val client: OkHttpClient, private val url: 
                         remaining -= count
                     }
                 }
-                this.length = result.header("Content-Range")?.substringAfterLast('/')?.toLongOrNull()
-                    ?: body.contentLength().takeIf { it >= 0 }?.let { if (result.code == 206) it + position else it } ?: -1
+                // A 206 that starts at a different offset would silently play the
+                // wrong bytes after a seek. WebDAV range replies must be exact.
+                val rangeLength = if (result.code == 206) {
+                    val header = result.header("Content-Range")
+                        ?: throw StorageException(StorageError.INVALID_RESPONSE)
+                    val match = Regex("bytes (\\d+)-(\\d+)/(\\d+|\\*)").matchEntire(header)
+                        ?: throw StorageException(StorageError.INVALID_RESPONSE)
+                    val start = match.groupValues[1].toLongOrNull()
+                    val end = match.groupValues[2].toLongOrNull()
+                    val total = match.groupValues[3].takeUnless { it == "*" }?.toLongOrNull()
+                    if (start != position || end == null || end < start ||
+                        (total != null && (total <= end || total <= 0))) {
+                        throw StorageException(StorageError.INVALID_RESPONSE)
+                    }
+                    total ?: -1L
+                } else -1L
+                this.length = if (result.code == 206) rangeLength
+                    else body.contentLength().takeIf { it >= 0 } ?: -1
                 response = result
                 input = stream
                 cursor = position
