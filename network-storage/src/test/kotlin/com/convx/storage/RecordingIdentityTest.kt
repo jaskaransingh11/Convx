@@ -25,6 +25,14 @@ class RecordingIdentityTest {
                 RecordingIdentity.compare(track, track.copy(version = it)))
         }
     }
+    @Test fun matchingRemasterLabelsStillRequireReview() {
+        val remastered = track.copy(title = "The Song (Remastered 2020)")
+        assertEquals(RecordingIdentity.Match.NEEDS_REVIEW, RecordingIdentity.compare(remastered, remastered))
+    }
+    @Test fun matchingLiveLabelsStillRequireReview() {
+        val live = track.copy(title = "The Song (Live)")
+        assertEquals(RecordingIdentity.Match.NEEDS_REVIEW, RecordingIdentity.compare(live, live))
+    }
     @Test fun rejectsDifferentIsrcWithIdenticalTags() = assertEquals(RecordingIdentity.Match.DIFFERENT,
         RecordingIdentity.compare(track, track.copy(isrc = "USABC2600002")))
     @Test fun requiresAlbumEvenWithIsrc() = assertEquals(RecordingIdentity.Match.NEEDS_REVIEW,
