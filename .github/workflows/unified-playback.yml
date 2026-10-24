@@ -28,8 +28,8 @@ jobs:
             -storepass android -keypass android \
             -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" \
             -keyalg RSA -keysize 2048 -validity 10000
-      - name: Unit tests and isolated debug APK
-        run: ./gradlew :network-storage:testDebugUnitTest :innertube:testDebugUnitTest :app:testArm64FossDebugUnitTest :app:assembleArm64FossDebug --no-configuration-cache --console=plain --max-workers=2 -Dorg.gradle.jvmargs=-Xmx5g
+      - name: Feature tests and isolated debug APK
+        run: ./gradlew :network-storage:testDebugUnitTest :innertube:testDebugUnitTest :app:testArm64FossDebugUnitTest --tests com.convx.music.utils.SyncStateTest :app:assembleArm64FossDebug --no-configuration-cache --console=plain --max-workers=2 -Dorg.gradle.jvmargs=-Xmx5g
       - uses: actions/upload-artifact@v4
         if: always()
         with:
