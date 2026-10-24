@@ -49,7 +49,7 @@ class FlacMetadataReaderTest {
     @Test(expected = java.io.IOException::class) fun rejectsTruncatedHeader() { FlacMetadataReader.read(MemoryFile(fixture().copyOf(45))) }
     @Test(expected = java.io.IOException::class) fun rejectsNonFlac() { FlacMetadataReader.read(MemoryFile("RIFFwave".toByteArray())) }
     @Test(expected = java.io.IOException::class) fun rejectsOversizedCommentBeforeAllocation() {
-        val data = fixture(); data[40] = 0x7f; data[41] = 0xff.toByte()
+        val data = fixture(); data[43] = 0x7f; data[44] = 0xff.toByte()
         FlacMetadataReader.read(MemoryFile(data))
     }
 }
