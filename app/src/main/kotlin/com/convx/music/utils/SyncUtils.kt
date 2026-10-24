@@ -373,7 +373,21 @@ class SyncUtils @Inject constructor(
             return@withContext
         }
 
-        updateState { copy(overallStatus = SyncStatus.Syncing, currentOperation = "Starting full sync") }
+        // Never inherit a Completed stage from a previous run: a skipped or
+        // interrupted stage in this run must remain visibly incomplete.
+        updateState {
+            copy(
+                overallStatus = SyncStatus.Syncing,
+                likedSongs = SyncStatus.Idle,
+                librarySongs = SyncStatus.Idle,
+                uploadedSongs = SyncStatus.Idle,
+                likedAlbums = SyncStatus.Idle,
+                uploadedAlbums = SyncStatus.Idle,
+                artists = SyncStatus.Idle,
+                playlists = SyncStatus.Idle,
+                currentOperation = "Starting full sync"
+            )
+        }
 
         try {
             // Sync in sequence to avoid overwhelming the API and database
