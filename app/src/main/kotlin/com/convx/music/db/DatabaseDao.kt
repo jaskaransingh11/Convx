@@ -1409,7 +1409,7 @@ interface DatabaseDao {
     }.map { it.reversed(descending) }
 
     @Transaction
-    @Query("SELECT * FROM song WHERE title LIKE '%' || :query || '%' AND inLibrary IS NOT NULL AND (:localOnly = 0 OR isLocal = 1) LIMIT :previewSize")
+    @Query("SELECT * FROM song WHERE title LIKE '%' || :query || '%' AND inLibrary IS NOT NULL AND (:localOnly = 0 OR isLocal = 1) AND (:localOnly = 1 OR NOT EXISTS (SELECT 1 FROM recording_source r WHERE r.sourceId = song.id AND r.canonicalId IS NOT NULL AND r.state IN ('manual', 'verified_metadata'))) LIMIT :previewSize")
     fun searchSongs(
         query: String,
         previewSize: Int = Int.MAX_VALUE,
@@ -1452,7 +1452,7 @@ interface DatabaseDao {
     // in LocalSearchViewModel scores these in Kotlin when the exact substring search (a typo)
     // comes back empty, so this must stay in sync with whatever "in library" means up there.
     @Transaction
-    @Query("SELECT * FROM song WHERE inLibrary IS NOT NULL AND (:localOnly = 0 OR isLocal = 1)")
+    @Query("SELECT * FROM song WHERE inLibrary IS NOT NULL AND (:localOnly = 0 OR isLocal = 1) AND (:localOnly = 1 OR NOT EXISTS (SELECT 1 FROM recording_source r WHERE r.sourceId = song.id AND r.canonicalId IS NOT NULL AND r.state IN ('manual', 'verified_metadata')))")
     fun allSearchableSongs(localOnly: Boolean = false): Flow<List<Song>>
 
     @Transaction
