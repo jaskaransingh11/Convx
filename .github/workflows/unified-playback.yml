@@ -17,6 +17,17 @@ jobs:
           java-version: 21
       - uses: gradle/actions/setup-gradle@v4
       - run: chmod +x gradlew
+      - name: Generate isolated debug keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.android"
+          keytool -genkeypair -noprompt \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storepass android -keypass android \
+            -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" \
+            -keyalg RSA -keysize 2048 -validity 10000
       - name: Unit tests and isolated debug APK
         run: ./gradlew :network-storage:testDebugUnitTest :innertube:testDebugUnitTest :app:testArm64FossDebugUnitTest :app:assembleArm64FossDebug --no-configuration-cache --console=plain --max-workers=2 -Dorg.gradle.jvmargs=-Xmx5g
       - uses: actions/upload-artifact@v4
