@@ -89,6 +89,17 @@ data class SyncState(
     val currentOperation: String = ""
 )
 
+/** A full sync is complete only if every requested stage actually reported success. */
+internal fun SyncState.incompleteSections(): List<String> = listOf(
+    "liked songs" to likedSongs,
+    "library songs" to librarySongs,
+    "uploaded songs" to uploadedSongs,
+    "liked albums" to likedAlbums,
+    "uploaded albums" to uploadedAlbums,
+    "artists" to artists,
+    "playlists" to playlists,
+).filter { it.second != SyncStatus.Completed }.map { it.first }
+
 @Singleton
 class SyncUtils @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -232,10 +243,6 @@ class SyncUtils @Inject constructor(
 
             startProcessingQueue()
             syncChannel.send(SyncOperation.FullSync)
-
-            context.dataStore.edit { settings ->
-                settings[LastFullSyncKey] = LocalDateTime.now().toEpochSecond(ZoneOffset.UTC)
-            }
         }
     }
 
@@ -393,8 +400,17 @@ class SyncUtils @Inject constructor(
 
             executeSyncAutoSyncPlaylists()
 
-            updateState { copy(overallStatus = SyncStatus.Completed, currentOperation = "") }
-            Timber.d("Full sync completed successfully")
+            val incomplete = _syncState.value.incompleteSections()
+            if (incomplete.isNotEmpty()) {
+                updateState { copy(overallStatus = SyncStatus.Error("Incomplete: " + incomplete.joinToString()), currentOperation = "") }
+                Timber.w("Full sync incomplete: %s", incomplete.joinToString())
+            } else {
+                context.dataStore.edit { settings ->
+                    settings[LastFullSyncKey] = LocalDateTime.now().toEpochSecond(ZoneOffset.UTC)
+                }
+                updateState { copy(overallStatus = SyncStatus.Completed, currentOperation = "") }
+                Timber.d("Full sync completed successfully")
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -876,6 +892,7 @@ class SyncUtils @Inject constructor(
                             }
                         }
 
+                    var failedPlaylists = false
                     for (playlist in remotePlaylistsToSync) {
                         try {
                             var playlistEntity = localPlaylists.find { it.playlist.browseId == playlist.id }?.playlist
@@ -907,13 +924,15 @@ class SyncUtils @Inject constructor(
                                 }
                             }
                             delay(DB_OPERATION_DELAY_MS)
-                        } catch (e: Exception) {
+                        } catch (e: CancellationException) { throw e }
+                        catch (e: Exception) {
+                            failedPlaylists = true
                             Timber.e(e, "Failed to sync playlist ${playlist.title}")
                         }
                     }
 
-                    updateState { copy(playlists = SyncStatus.Completed) }
-                    Timber.d("Synced ${remotePlaylists.size} saved playlists")
+                    updateState { copy(playlists = if (failedPlaylists) SyncStatus.Error("Some playlists need retry") else SyncStatus.Completed) }
+                    if (!failedPlaylists) Timber.d("Synced ${remotePlaylists.size} saved playlists")
                 } catch (e: Exception) {
                     Timber.e(e, "Error processing saved playlists")
                     updateState { copy(playlists = SyncStatus.Error(e.message ?: "Unknown error")) }
@@ -940,77 +959,59 @@ class SyncUtils @Inject constructor(
 
             Timber.d("syncAutoSyncPlaylists: Found ${autoSyncPlaylists.size} playlists to sync")
 
+            var failedPlaylists = false
             autoSyncPlaylists.forEach { playlist ->
                 val browseId = playlist.playlist.browseId ?: return@forEach
                 try {
                     executeSyncPlaylist(browseId, playlist.playlist.id)
                     delay(DB_OPERATION_DELAY_MS)
-                } catch (e: Exception) {
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) {
+                    failedPlaylists = true
                     Timber.e(e, "Failed to sync playlist ${playlist.playlist.name}")
                 }
             }
-        } catch (e: Exception) {
+            if (failedPlaylists) updateState { copy(playlists = SyncStatus.Error("Some auto-sync playlists need retry")) }
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
             Timber.e(e, "Error syncing auto-sync playlists")
+            updateState { copy(playlists = SyncStatus.Error("Auto-sync playlists failed")) }
         }
     }
 
     private suspend fun executeSyncPlaylist(browseId: String, playlistId: String) = withContext(Dispatchers.IO) {
         Timber.d("syncPlaylist: Starting sync for browseId=$browseId, playlistId=$playlistId")
 
-        withRetry {
-            YouTube.playlist(browseId).completed()
-        }.onSuccess { result ->
-            result.onSuccess { page ->
-                try {
-                    val songs = page.songs.map(SongItem::toMediaMetadata)
-                    Timber.d("syncPlaylist: Fetched ${songs.size} songs from remote")
+        // Do not treat a failed or truncated page as a successful empty playlist.
+        val page = withRetry { YouTube.playlist(browseId).completed().getOrThrow() }.getOrThrow()
+        val songs = page.songs.map(SongItem::toMediaMetadata)
+        Timber.d("syncPlaylist: Fetched ${songs.size} songs from remote")
+        val remoteIds = songs.map { it.id }
+        val localIds = database.playlistSongs(playlistId).first()
+            .sortedBy { it.map.position }
+            .map { it.song.id }
 
-                    if (songs.isEmpty()) {
-                        Timber.w("syncPlaylist: Remote playlist is empty, clearing local playlist")
-                        database.withTransaction {
-                            database.clearPlaylist(playlistId)
-                        }
-                        return@onSuccess
-                    }
+        if (remoteIds == localIds) return@withContext
 
-                    val remoteIds = songs.map { it.id }
-                    val localIds = database.playlistSongs(playlistId).first()
-                        .sortedBy { it.map.position }
-                        .map { it.song.id }
-
-                    if (remoteIds == localIds) {
-                        Timber.d("syncPlaylist: Local and remote are in sync, no changes needed")
-                        return@onSuccess
-                    }
-
-                    Timber.d("syncPlaylist: Updating local playlist (remote: ${remoteIds.size}, local: ${localIds.size})")
-
-                    database.withTransaction {
-                        database.clearPlaylist(playlistId)
-                        songs.forEachIndexed { idx, song ->
-                            if (database.song(song.id).firstOrNull() == null) {
-                                database.insert(song)
-                            }
-                            database.insert(
-                                PlaylistSongMap(
-                                    songId = song.id,
-                                    playlistId = playlistId,
-                                    position = idx,
-                                    setVideoId = song.setVideoId
-                                )
-                            )
-                        }
-                    }
-                    Timber.d("syncPlaylist: Successfully synced playlist")
-                } catch (e: Exception) {
-                    Timber.e(e, "Error processing playlist sync")
+        // The complete remote playlist is authoritative for auto-sync playlists;
+        // write the replacement atomically so an interrupted import cannot half-clear it.
+        database.withTransaction {
+            database.clearPlaylist(playlistId)
+            songs.forEachIndexed { idx, song ->
+                if (database.song(song.id).firstOrNull() == null) {
+                    database.insert(song)
                 }
-            }.onFailure { e ->
-                Timber.e(e, "syncPlaylist: Failed to fetch playlist from YouTube")
+                database.insert(
+                    PlaylistSongMap(
+                        songId = song.id,
+                        playlistId = playlistId,
+                        position = idx,
+                        setVideoId = song.setVideoId
+                    )
+                )
             }
-        }.onFailure { e ->
-            Timber.e(e, "syncPlaylist: Failed after retries")
         }
+        Timber.d("syncPlaylist: Successfully synced playlist")
     }
 
     private suspend fun executeCleanupDuplicatePlaylists() = withContext(Dispatchers.IO) {
