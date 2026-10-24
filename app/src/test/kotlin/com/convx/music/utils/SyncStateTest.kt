@@ -28,4 +28,15 @@ class SyncStateTest {
         val pending = completed.copy(likedSongs = SyncStatus.Error("Pending delivery verification"))
         assertEquals(listOf("liked songs"), pending.incompleteSections())
     }
+
+    @Test fun emptyRemoteSnapshotCannotErasePopulatedPlaylist() {
+        try {
+            requireSafeRemotePlaylist(emptyList(), listOf("video-a"))
+            org.junit.Assert.fail("Expected protective guard")
+        } catch (expected: IllegalStateException) {
+            org.junit.Assert.assertTrue(expected.message.orEmpty().contains("retain local"))
+        }
+        requireSafeRemotePlaylist(emptyList(), emptyList())
+        requireSafeRemotePlaylist(listOf("video-b"), listOf("video-a"))
+    }
 }
