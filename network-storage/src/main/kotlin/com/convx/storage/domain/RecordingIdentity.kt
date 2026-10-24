@@ -45,6 +45,9 @@ object RecordingIdentity {
         val album = a.album?.let(::normalize).orEmpty()
         if (album.isEmpty() || album != b.album?.let(::normalize)) return Match.NEEDS_REVIEW
         if (normalize(a.version.orEmpty()) != normalize(b.version.orEmpty())) return Match.NEEDS_REVIEW
+        // Matching labels are not enough to distinguish two live performances, remixes,
+        // edits or remasters; require a user-reviewed link for these variants.
+        if (version(a).isNotEmpty()) return Match.NEEDS_REVIEW
         return Match.VERIFIED_METADATA
     }
 
