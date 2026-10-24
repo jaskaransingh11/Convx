@@ -3038,6 +3038,9 @@ class MusicService :
         }
     }
 
+    private val activeRecordingSources = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val unavailableRecordingSources = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     override fun onPlayerError(error: PlaybackException) {
         super.onPlayerError(error)
 
@@ -3048,6 +3051,21 @@ class MusicService :
         }
 
         val mediaId = player.currentMediaItem?.mediaId
+        if (mediaId != null) {
+            activeRecordingSources.remove(mediaId)?.let { sourceKey ->
+                unavailableRecordingSources[sourceKey] = System.currentTimeMillis() + 60_000
+                val index = player.currentMediaItemIndex
+                val position = player.currentPosition.coerceAtLeast(0)
+                val resume = player.playWhenReady
+                player.currentMediaItem?.let { item ->
+                    player.replaceMediaItem(index, item)
+                    player.seekTo(index, position)
+                    player.prepare()
+                    player.playWhenReady = resume
+                }
+                return
+            }
+        }
         logPlayerErrorDetail(error, mediaId)
         Timber.tag(TAG).w(error, "Player error occurred for $mediaId: errorCode=${error.errorCode}, message=${error.message}")
         reportException(error)
@@ -3648,6 +3666,7 @@ class MusicService :
 
         fun createDataSourceFactory(): DataSource.Factory {
             return ResolvingDataSource.Factory(audioSourceBuilder.createCacheDataSource()) { dataSpec ->
+                if (dataSpec.uri.scheme == com.convx.storage.domain.NetworkMediaUri.Scheme) return@Factory dataSpec
                 val mediaId = dataSpec.key ?: error("No media id")
 
                 // DefaultDataSource handles local URIs without YouTube resolution.
@@ -3731,7 +3750,21 @@ class MusicService :
                     ResolvingMediaSource(mediaItem) {
                         val mediaId = mediaItem.mediaId
                         if (mediaId.startsWith("content://") || mediaId.startsWith("file://") ||
-                            mediaId.startsWith("/storage/")) return@ResolvingMediaSource progressive.createMediaSource(mediaItem)
+                            mediaId.startsWith("/storage/") ||
+                            mediaId.startsWith(com.convx.storage.domain.NetworkMediaUri.Scheme + "://")) {
+                            return@ResolvingMediaSource progressive.createMediaSource(mediaItem)
+                        }
+                        val recording = database.recordingDao.verifiedSources(mediaId).firstOrNull { source ->
+                            (unavailableRecordingSources[source.sourceId + "#" + source.revision] ?: 0) < System.currentTimeMillis()
+                        }
+                        if (recording != null) {
+                            val sourceKey = recording.sourceId + "#" + recording.revision
+                            activeRecordingSources[mediaId] = sourceKey
+                            return@ResolvingMediaSource progressive.createMediaSource(mediaItem.buildUpon()
+                                .setUri(recording.sourceId).setCustomCacheKey(sourceKey)
+                                .setMimeType(androidx.media3.common.MimeTypes.AUDIO_FLAC).build())
+                        }
+                        activeRecordingSources.remove(mediaId)
                         val key = effectiveCacheKey(mediaId)
                         if (!bypassCacheForQualityChange.contains(mediaId) &&
                             (downloadCache.isCached(downloadKey(mediaId), 0, 1) || playerCache.isCached(key, 0, CHUNK_LENGTH))) {

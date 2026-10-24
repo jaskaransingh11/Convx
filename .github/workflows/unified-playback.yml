@@ -1,0 +1,29 @@
+name: Unified playback verification
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/unified-flac-playback]
+permissions:
+  contents: read
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - run: chmod +x gradlew
+      - name: Unit tests and isolated debug APK
+        run: ./gradlew :network-storage:testDebugUnitTest :innertube:testDebugUnitTest :app:testArm64FossDebugUnitTest :app:assembleArm64FossDebug --no-configuration-cache --console=plain --max-workers=2 -Dorg.gradle.jvmargs=-Xmx5g
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unified-playback-results
+          path: |
+            **/build/test-results/**/*.xml
+            app/build/outputs/apk/arm64Foss/debug/*.apk
+            app/schemas/**/*.json

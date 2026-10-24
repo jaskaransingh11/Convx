@@ -75,6 +75,12 @@ class NetworkMusicRepository(
         }
     }
 
+    suspend fun readFlacMetadata(uri: String): RecordingMetadata = withContext(Dispatchers.IO) {
+        val location = NetworkMediaUri.parse(uri) ?: throw StorageException(StorageError.INVALID_CONFIGURATION)
+        val server = store.find(location.serverId) ?: throw StorageException(StorageError.NOT_FOUND)
+        source(server).open(server, location.path).use(FlacMetadataReader::read)
+    }
+
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     fun dataSourceFactory(downstream: DataSource.Factory): DataSource.Factory = NetworkDataSourceFactory(downstream, store, webDav, smb)
 

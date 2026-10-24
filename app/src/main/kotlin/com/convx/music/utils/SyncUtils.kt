@@ -221,6 +221,9 @@ class SyncUtils @Inject constructor(
                 return@launch
             }
 
+            try { flushPendingLikes() } catch (e: CancellationException) { throw e } catch (_: Exception) {
+                updateState { copy(likedSongs = SyncStatus.Error("Likes pending verification")) }
+            }
             val lastSync = context.dataStore.get(LastFullSyncKey, 0L)
             val currentTime = LocalDateTime.now().toEpochSecond(ZoneOffset.UTC)
             if (lastSync > 0 && (currentTime - lastSync) < SYNC_COOLDOWN) {
@@ -400,108 +403,79 @@ class SyncUtils @Inject constructor(
         }
     }
 
-    private suspend fun executeLikeSong(s: SongEntity) = withContext(Dispatchers.IO) {
-        if (!isLoggedIn()) {
-            Timber.w("Skipping likeSong - user not logged in")
-            return@withContext
-        }
+    private val likesMutex = Mutex()
 
-        withRetry {
-            YouTube.likeVideo(s.id, s.liked)
-        }.onFailure { e ->
-            Timber.e(e, "Failed to like song on YouTube: ${s.id}")
-        }
-
-        if (context.dataStore.get(LastFMUseSendLikes, false)) {
-            try {
-                val dbSong = database.song(s.id).firstOrNull()
-                LastFM.setLoveStatus(
-                    artist = dbSong?.artists?.joinToString { a -> a.name } ?: "",
-                    track = s.title,
-                    love = s.liked
-                )
-            } catch (e: Exception) {
-                Timber.e(e, "Failed to update LastFM love status")
+    private suspend fun flushPendingLikes() = likesMutex.withLock {
+        if (!isLoggedIn()) return@withLock
+        val scope = currentYouTubeSyncScope() ?: return@withLock
+        val pending = database.recordingDao.pendingLikes(scope)
+        if (pending.isEmpty()) return@withLock
+        var remote = YouTube.playlist("LM").completed().getOrThrow().songs.mapTo(mutableSetOf()) { it.id }
+        for (entry in pending) {
+            check(currentYouTubeSyncScope() == scope) { "Account changed during sync" }
+            if ((entry.videoId in remote) != entry.desiredLiked) {
+                // Re-read before retrying: an earlier timeout may already have committed remotely.
+                YouTube.likeVideo(entry.videoId, entry.desiredLiked).getOrThrow()
+                remote = YouTube.playlist("LM").completed().getOrThrow().songs.mapTo(mutableSetOf()) { it.id }
             }
+            check(currentYouTubeSyncScope() == scope) { "Account changed during sync" }
+            check((entry.videoId in remote) == entry.desiredLiked) { "Like delivery awaits verification" }
+            database.recordingDao.acknowledgeLike(scope, entry.videoId, entry.revision)
+        }
+    }
+
+    private suspend fun executeLikeSong(s: SongEntity) = withContext(Dispatchers.IO) {
+        try {
+            flushPendingLikes()
+            updateState { copy(likedSongs = SyncStatus.Completed) }
+        } catch (e: CancellationException) { throw e }
+        catch (_: Exception) {
+            updateState { copy(likedSongs = SyncStatus.Error("Likes pending verification; retry sync when connected")) }
+        }
+        if (context.dataStore.get(LastFMUseSendLikes, false)) {
+            val dbSong = database.song(s.id).firstOrNull()
+            runCatching { LastFM.setLoveStatus(dbSong?.artists?.joinToString { it.name }.orEmpty(), s.title, s.liked) }
         }
     }
 
     private suspend fun executeSyncLikedSongs() = withContext(Dispatchers.IO) {
-        if (!isLoggedIn()) {
-            Timber.w("Skipping syncLikedSongs - user not logged in")
-            return@withContext
-        }
-
+        if (!isLoggedIn()) return@withContext
+        val scope = currentYouTubeSyncScope() ?: return@withContext
         updateState { copy(likedSongs = SyncStatus.Syncing, currentOperation = "Syncing liked songs") }
-
-        withRetry {
-            YouTube.playlist("LM").completed()
-        }.onSuccess { result ->
-            result.onSuccess { page ->
-                try {
-                    val remoteSongs = page.songs
-                    val remoteIds = remoteSongs.mapTo(mutableSetOf()) { it.id }
-                    val localSongs = database.likedSongsByNameAsc().first()
-
-                    // Remove likes from songs not in remote
-                    localSongs.filterNot { it.id in remoteIds }.forEach { song ->
-                        try {
-                            database.update(song.song.localToggleLike())
-                            delay(DB_OPERATION_DELAY_MS)
-                        } catch (e: Exception) {
-                            Timber.e(e, "Failed to update song: ${song.id}")
-                        }
-                    }
-
-                    // Add/update songs from remote
-                    val now = LocalDateTime.now()
-                    remoteSongs.forEachIndexed { index, song ->
-                        try {
-                            val dbSong = database.song(song.id).firstOrNull()
-                            val timestamp = now.minusSeconds(index.toLong())
-                            val isVideoSong = song.isVideoSong
-                            val isPodcastEpisode = song.isPodcastEpisode
-
-                            database.transaction {
-                                if (dbSong == null) {
-                                    insert(song.toMediaMetadata()) {
-                                        it.copy(
-                                            liked = true,
-                                            likedDate = timestamp,
-                                            isVideo = isVideoSong,
-                                            isPodcastEpisode = isPodcastEpisode,
-                                        )
-                                    }
-                                } else if (!dbSong.song.liked || dbSong.song.likedDate != timestamp ||
-                                    dbSong.song.isVideo != isVideoSong || dbSong.song.isPodcastEpisode != isPodcastEpisode
-                                ) {
-                                    update(dbSong.song.copy(
-                                        liked = true,
-                                        likedDate = timestamp,
-                                        isVideo = isVideoSong,
-                                        isPodcastEpisode = isPodcastEpisode,
-                                    ))
-                                }
-                            }
-                            delay(DB_OPERATION_DELAY_MS)
-                        } catch (e: Exception) {
-                            Timber.e(e, "Failed to process song: ${song.id}")
-                        }
-                    }
-
-                    updateState { copy(likedSongs = SyncStatus.Completed) }
-                    Timber.d("Synced ${remoteSongs.size} liked songs")
-                } catch (e: Exception) {
-                    Timber.e(e, "Error processing liked songs")
-                    updateState { copy(likedSongs = SyncStatus.Error(e.message ?: "Unknown error")) }
-                }
-            }.onFailure { e ->
-                Timber.e(e, "Failed to fetch liked songs from YouTube")
-                updateState { copy(likedSongs = SyncStatus.Error(e.message ?: "Unknown error")) }
+        try {
+            // Failed delivery must not prevent remote additions; pending IDs remain protected below.
+            try { flushPendingLikes() } catch (e: CancellationException) { throw e } catch (_: Exception) { }
+            val page = YouTube.playlist("LM").completed().getOrThrow()
+            check(currentYouTubeSyncScope() == scope) { "Account changed during sync" }
+            val remoteIds = page.songs.mapTo(mutableSetOf()) { it.id }
+            val previous = database.recordingDao.previousRemoteLikes(scope).toSet()
+            check(previous.isEmpty() || remoteIds.size * 4 >= previous.size * 3) {
+                "Liked library shrank unexpectedly; deletion review required"
             }
-        }.onFailure { e ->
-            Timber.e(e, "Failed to sync liked songs after retries")
-            updateState { copy(likedSongs = SyncStatus.Error(e.message ?: "Unknown error")) }
+            database.withTransaction {
+                val pending = recordingDao.pendingLikes(scope).mapTo(mutableSetOf()) { it.videoId }
+                val local = likedSongsByNameAsc().first()
+                // Only previously observed remote likes may be removed; local-only likes are untouched.
+                local.filter { it.id in previous && it.id !in remoteIds && it.id !in pending && !it.song.isLocal }.forEach {
+                    updateFromSync(it.song.copy(liked = false, likedDate = null))
+                }
+                val now = LocalDateTime.now()
+                page.songs.forEachIndexed { index, song ->
+                    if (song.id !in pending) {
+                        val old = getSongById(song.id)?.song
+                        if (old == null) insert(song.toMediaMetadata()) { it.copy(liked = true, likedDate = now.minusSeconds(index.toLong())) }
+                        else if (!old.liked) updateFromSync(old.copy(liked = true, likedDate = now.minusSeconds(index.toLong())))
+                    }
+                }
+                recordingDao.clearRemoteLikes(scope)
+                recordingDao.saveRemoteLikes(remoteIds.map { com.convx.music.db.entities.RemoteLikeSnapshotEntity(scope, it) })
+            }
+            RecordingIndex.reconcile(database)
+            val pending = database.recordingDao.pendingLikes(scope).isNotEmpty()
+            updateState { copy(likedSongs = if (pending) SyncStatus.Error("Likes pending verification") else SyncStatus.Completed) }
+        } catch (e: CancellationException) { throw e }
+        catch (_: Exception) {
+            updateState { copy(likedSongs = SyncStatus.Error("Liked library sync incomplete; local changes retained")) }
         }
     }
 
@@ -524,7 +498,7 @@ class SyncUtils @Inject constructor(
 
                     localSongs.filterNot { it.id in remoteIds }.forEach { song ->
                         try {
-                            database.update(song.song.toggleLibrary())
+                            database.updateFromSync(song.song.toggleLibrary(syncToYouTube = false))
                             delay(DB_OPERATION_DELAY_MS)
                         } catch (e: Exception) {
                             Timber.e(e, "Failed to update song: ${song.id}")
@@ -538,7 +512,7 @@ class SyncUtils @Inject constructor(
                                 if (dbSong == null) {
                                     insert(song.toMediaMetadata()) { it.toggleLibrary() }
                                 } else if (dbSong.song.inLibrary == null) {
-                                    update(dbSong.song.toggleLibrary())
+                                    updateFromSync(dbSong.song.toggleLibrary(syncToYouTube = false))
                                 }
                             }
                             delay(DB_OPERATION_DELAY_MS)
@@ -599,7 +573,7 @@ class SyncUtils @Inject constructor(
                     songsToRemove.forEach { song ->
                         try {
                             Timber.d("[UPLOAD_DEBUG] Removing uploaded flag from: ${song.id}")
-                            database.update(song.song.toggleUploaded())
+                            database.updateFromSync(song.song.toggleUploaded())
                             delay(DB_OPERATION_DELAY_MS)
                         } catch (e: Exception) {
                             Timber.e(e, "[UPLOAD_DEBUG] Failed to update song: ${song.id}")
@@ -616,7 +590,7 @@ class SyncUtils @Inject constructor(
                                     insert(song.toMediaMetadata()) { it.toggleUploaded() }
                                 } else if (!dbSong.song.isUploaded) {
                                     Timber.d("[UPLOAD_DEBUG] Updating existing song to uploaded: ${song.id}")
-                                    update(dbSong.song.toggleUploaded())
+                                    updateFromSync(dbSong.song.toggleUploaded())
                                 } else {
                                     Timber.d("[UPLOAD_DEBUG] Song already marked as uploaded: ${song.id}")
                                 }
@@ -1078,14 +1052,14 @@ class SyncUtils @Inject constructor(
                 // Clear liked songs
                 val likedSongs = database.likedSongsByNameAsc().first()
                 likedSongs.forEach {
-                    database.update(it.song.copy(liked = false, likedDate = null))
+                    database.updateFromSync(it.song.copy(liked = false, likedDate = null))
                 }
 
                 // Clear library songs
                 val librarySongs = database.songsByNameAsc().first()
                 librarySongs.forEach {
                     if (it.song.inLibrary != null) {
-                        database.update(it.song.copy(inLibrary = null))
+                        database.updateFromSync(it.song.copy(inLibrary = null))
                     }
                 }
 
@@ -1113,7 +1087,7 @@ class SyncUtils @Inject constructor(
                 // Clear uploaded songs
                 val uploadedSongs = database.uploadedSongsByNameAsc().first()
                 uploadedSongs.forEach {
-                    database.update(it.song.copy(isUploaded = false))
+                    database.updateFromSync(it.song.copy(isUploaded = false))
                 }
 
                 // Clear uploaded albums

@@ -25,7 +25,9 @@ class NetworkDataSourceFactory(
         private var logicalUri: Uri? = null
         override fun addTransferListener(listener: TransferListener) { listeners += listener; inner.addTransferListener(listener) }
         override fun open(dataSpec: DataSpec): Long {
-            if (dataSpec.uri.scheme != NetworkMediaUri.Scheme) return inner.open(dataSpec)
+            logicalUri = null
+            active = inner
+            if (dataSpec.uri.scheme != NetworkMediaUri.Scheme) return active.open(dataSpec)
             val location = NetworkMediaUri.parse(dataSpec.uri.toString()) ?: throw StorageException(StorageError.INVALID_CONFIGURATION)
             val server = store.find(location.serverId) ?: throw StorageException(StorageError.NOT_FOUND)
             logicalUri = dataSpec.uri
