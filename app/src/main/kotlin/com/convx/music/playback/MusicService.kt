@@ -3754,9 +3754,15 @@ class MusicService :
                             mediaId.startsWith(com.convx.storage.domain.NetworkMediaUri.Scheme + "://")) {
                             return@ResolvingMediaSource progressive.createMediaSource(mediaItem)
                         }
-                        val recording = database.recordingDao.verifiedSources(mediaId).firstOrNull { source ->
-                            (unavailableRecordingSources[source.sourceId + "#" + source.revision] ?: 0) < System.currentTimeMillis()
-                        }
+                        // Select only verified copies, favoring compact lossless before oversized
+                        // hi-res files. A manual recording link remains the explicit user override.
+                        // A failed copy stays quarantined briefly; other verified copies (or
+                        // YouTube) take over without changing mediaId, likes, or playlist identity.
+                        val recording = RecordingSourcePreference.choose(
+                            database.recordingDao.verifiedSources(mediaId),
+                            unavailableRecordingSources,
+                            System.currentTimeMillis(),
+                        )
                         if (recording != null) {
                             val sourceKey = recording.sourceId + "#" + recording.revision
                             activeRecordingSources[mediaId] = sourceKey
